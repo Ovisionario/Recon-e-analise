@@ -1,0 +1,133 @@
+import os
+import sys
+import subprocess
+import csv
+import shutil
+
+# --- Configurações de Caminho ---
+# Assumimos que o analyzer.py está no diretório 'analise'
+HOME = os.path.expanduser("~")
+BASE_DIR_RECON = os.path.join(HOME, "Ferramentas", "recon", "resultados") 
+BASE_DIR_ANALYZE = os.path.join(HOME, "Ferramentas", "analise", "resultados") 
+
+# [Copie as funções which(), ensure_dir(), e safe_run() do seu recon.py para cá]
+
+def get_ips_from_csv(domain):
+    """Lê o CSV e extrai IPs únicos dos ativos."""
+    csv_path = os.path.join(BASE_DIR_RECON, domain, f"{domain}-dados_analise.csv")
+    
+    if not os.path.exists(csv_path):
+        print(f"ERRO: Arquivo de análise não encontrado em {csv_path}. Execute o recon.py primeiro.")
+        return []
+
+    ips_set = set()
+    try:
+        with open(csv_path, mode='r', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                # Filtra apenas IPs válidos e Status Code relevante
+                ip = row.get("IP", "").strip()
+                status = row.get("Status", "").strip()
+                
+                # Considera IPs com status code de sucesso ou redirecionamento
+                if ip and ip != "N/A" and status in ["200", "301", "302"]:
+                    ips_set.add(ip)
+        
+        return list(ips_set)
+    except Exception as e:
+        print(f"ERRO ao ler CSV: {e}")
+        return []
+
+def run_nmap_scan(domain, target_ips):
+    """Executa o Nmap para Descoberta de Serviços e Versões."""
+    if not which("nmap"):
+        print("ERRO: Nmap não encontrado. Certifique-se de que ele está instalado.")
+        return
+
+    target_dir = os.path.join(BASE_DIR_ANALYZE, domain)
+    ensure_dir(target_dir)
+    nmap_xml_out = os.path.join(target_dir, f"{domain}-nmap_scan.xml")
+    
+    if not target_ips:
+        print("Nenhum IP ativo para escanear.")
+        return
+
+    print(f"\n[2/3] Rodando Nmap (Service/Version Scan) em {len(target_ips)} IPs...")
+    
+    # Flags Nmap:
+    # -sV: Detecção de Serviços e Versões (crucial para CVEs)
+    # -T4: Agressividade moderada
+    # -Pn: Assume que o host está online
+    # -oX: Saída em formato XML (fácil para parsear no Python)
+    
+    nmap_cmd = [
+        "nmap", 
+        "-sV", 
+        "-T4", 
+        "-Pn", 
+        "-oX", nmap_xml_out,
+        "-iL", "-" # Ler IPs da entrada padrão (stdin)
+    ]
+
+    try:
+        # Passa a lista de IPs para o Nmap via entrada padrão
+        input_data = "\n".join(target_ips)
+        proc = subprocess.run(
+            nmap_cmd, 
+            input=input_data, 
+            encoding='utf-8',
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            check=True,
+            timeout=1800 # 30 minutos, pois o -sV pode ser lento
+        )
+        print(f"    -> Scan Nmap concluído. Resultados salvos em: {nmap_xml_out}")
+        return nmap_xml_out
+
+    except subprocess.CalledProcessError as e:
+        print(f"    -> ERRO Nmap: Falha na execução. Código {e.returncode}.")
+        print(f"    -> Mensagem: {e.stderr.decode('utf-8', errors='ignore')[:200]}...")
+    except Exception as e:
+        print(f"    -> ERRO inesperado no Nmap: {e}")
+    
+    return None
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Uso: python3 analyzer.py <dominio_alvo>")
+        sys.exit(1)
+
+    domain = sys.argv[1].strip().lower()
+    
+    # 1. Fase de Ingestão e Filtro
+    print(f"[1/3] Analisando dados de recon para {domain}...")
+    target_ips = get_ips_from_csv(domain)
+    print(f"    -> {len(target_ips)} IPs únicos e ativos encontrados para varredura.")
+
+    if not target_ips:
+        print("Análise encerrada: Nenhum alvo ativo encontrado.")
+        sys.exit(0)
+        
+    # 2. Fase de Descoberta Ativa (Nmap)
+    nmap_file = run_nmap_scan(domain, target_ips)
+
+    # 3. Fase de Mapeamento de Vulnerabilidades (Próxima etapa)
+    if nmap_file:
+        print(f"\n[3/3] Nmap concluído. Próxima etapa: Ler {nmap_file} e executar WhatWeb/Nuclei.")
+    
+    print("\n--- Processamento concluído por hoje. ---")
+
+
+if __name__ == "__main__":
+    # Importante: Você deve incluir as funções which(), ensure_dir(), e safe_run() aqui.
+    # Exemplo (se não puder importar do recon.py, defina-as aqui):
+    def which(program): return shutil.which(program)
+    def ensure_dir(path): os.makedirs(path, exist_ok=True)
+    def safe_run(cmd, out_path=None, timeout=None):
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, universal_newlines=True, encoding='utf-8', errors='ignore')
+            if out_path: with open(out_path, "w") as f: f.write(proc.stdout)
+            return proc.returncode, proc.stdout + proc.stderr
+        except Exception as e: return 1, str(e)
+        
+    main()

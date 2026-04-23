@@ -1,0 +1,4 @@
+path to the binary is added to the path environment variable.
+unable to execute massdns. make sure it is present and that the
+www.alcapizza.com.br
+www.www.alcapizza.com.br
